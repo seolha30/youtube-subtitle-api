@@ -23,7 +23,7 @@ export default async function handler(req, res) {
       availableLanguages: subtitleData.languages,
       subtitle: subtitleData.subtitle,
       language: subtitleData.selectedLanguage,
-      debug: subtitleData.debug // 디버깅 정보 추가
+      debug: subtitleData.debug
     });
     
   } catch (error) {
@@ -64,15 +64,18 @@ async function getYouTubeSubtitles(videoId) {
     }
     
     // 3단계: 자막 다운로드
-    const { subtitleText, xmlSample } = await downloadSubtitle(selectedTrack.baseUrl);
+    const downloadResult = await downloadSubtitle(selectedTrack.baseUrl);
     
     return {
       languages: captionTracks.map(track => `${track.name} (${track.languageCode})`),
-      subtitle: subtitleText,
+      subtitle: downloadResult.subtitleText,
       selectedLanguage: `${selectedTrack.name} (${selectedTrack.languageCode})`,
       debug: {
         selectedTrackUrl: selectedTrack.baseUrl,
-        xmlSample: xmlSample
+        downloadStatus: downloadResult.status,
+        downloadError: downloadResult.error,
+        responseHeaders: downloadResult.headers,
+        xmlSample: downloadResult.xmlSample
       }
     };
     
@@ -88,7 +91,13 @@ async function getCaptionTrackList(videoId) {
     const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
     const response = await fetch(watchUrl, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1'
       }
     });
     
@@ -145,32 +154,63 @@ async function getCaptionTrackList(videoId) {
   }
 }
 
-// 자막 다운로드 및 파싱
+// 자막 다운로드 및 파싱 (개선된 디버깅)
 async function downloadSubtitle(baseUrl) {
   try {
     // XML 형태의 자막 다운로드
     const response = await fetch(baseUrl, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://www.youtube.com/',
+        'Origin': 'https://www.youtube.com'
       }
     });
     
+    // 응답 상태 체크
     if (!response.ok) {
-      throw new Error(`자막 다운로드 실패: ${response.status}`);
+      return {
+        subtitleText: `자막 다운로드 실패: HTTP ${response.status}`,
+        status: response.status,
+        error: `HTTP ${response.status} ${response.statusText}`,
+        headers: Object.fromEntries(response.headers.entries()),
+        xmlSample: ''
+      };
     }
     
     const xmlData = await response.text();
+    
+    // 빈 응답 체크
+    if (!xmlData || xmlData.trim().length === 0) {
+      return {
+        subtitleText: '빈 자막 응답을 받았습니다.',
+        status: response.status,
+        error: '빈 응답',
+        headers: Object.fromEntries(response.headers.entries()),
+        xmlSample: ''
+      };
+    }
     
     // XML 파싱하여 텍스트만 추출
     const subtitleText = parseSubtitleXML(xmlData);
     
     return {
       subtitleText,
-      xmlSample: xmlData.substring(0, 500) // 디버깅용 XML 샘플
+      status: response.status,
+      error: null,
+      headers: Object.fromEntries(response.headers.entries()),
+      xmlSample: xmlData.substring(0, 1000) // 처음 1000자
     };
     
   } catch (error) {
-    throw new Error(`자막 다운로드 실패: ${error.message}`);
+    return {
+      subtitleText: `자막 다운로드 예외: ${error.message}`,
+      status: null,
+      error: error.message,
+      headers: {},
+      xmlSample: ''
+    };
   }
 }
 
