@@ -1,6 +1,7 @@
 {
   "name": "youtube-subtitle-api",
   "version": "1.0.0",
+  "type": "module",
   "dependencies": {
     "youtube-caption-extractor": "^1.4.3"
   }
