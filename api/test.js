@@ -22,7 +22,8 @@ export default async function handler(req, res) {
       videoId: videoId,
       availableLanguages: subtitleData.languages,
       subtitle: subtitleData.subtitle,
-      language: subtitleData.selectedLanguage
+      language: subtitleData.selectedLanguage,
+      debug: subtitleData.debug // 디버깅 정보 추가
     });
     
   } catch (error) {
@@ -63,12 +64,16 @@ async function getYouTubeSubtitles(videoId) {
     }
     
     // 3단계: 자막 다운로드
-    const subtitleText = await downloadSubtitle(selectedTrack.baseUrl);
+    const { subtitleText, xmlSample } = await downloadSubtitle(selectedTrack.baseUrl);
     
     return {
       languages: captionTracks.map(track => `${track.name} (${track.languageCode})`),
       subtitle: subtitleText,
-      selectedLanguage: `${selectedTrack.name} (${selectedTrack.languageCode})`
+      selectedLanguage: `${selectedTrack.name} (${selectedTrack.languageCode})`,
+      debug: {
+        selectedTrackUrl: selectedTrack.baseUrl,
+        xmlSample: xmlSample
+      }
     };
     
   } catch (error) {
@@ -159,20 +164,39 @@ async function downloadSubtitle(baseUrl) {
     // XML 파싱하여 텍스트만 추출
     const subtitleText = parseSubtitleXML(xmlData);
     
-    return subtitleText;
+    return {
+      subtitleText,
+      xmlSample: xmlData.substring(0, 500) // 디버깅용 XML 샘플
+    };
     
   } catch (error) {
     throw new Error(`자막 다운로드 실패: ${error.message}`);
   }
 }
 
-// XML 자막을 텍스트로 변환
+// XML 자막을 텍스트로 변환 (개선된 버전)
 function parseSubtitleXML(xmlData) {
   try {
-    // XML에서 텍스트 추출 (간단한 정규식 사용)
-    const textMatches = xmlData.match(/<text[^>]*>(.*?)<\/text>/g);
+    // 여러 가지 패턴 시도
+    let textMatches = [];
     
-    if (!textMatches) {
+    // 패턴 1: <text> 태그
+    textMatches = xmlData.match(/<text[^>]*>(.*?)<\/text>/gs);
+    
+    // 패턴 2: <p> 태그 (일부 자막에서 사용)
+    if (!textMatches || textMatches.length === 0) {
+      textMatches = xmlData.match(/<p[^>]*>(.*?)<\/p>/gs);
+    }
+    
+    // 패턴 3: content 속성
+    if (!textMatches || textMatches.length === 0) {
+      const contentMatches = xmlData.match(/content="([^"]+)"/g);
+      if (contentMatches) {
+        textMatches = contentMatches.map(match => match.replace(/content="([^"]+)"/, '$1'));
+      }
+    }
+    
+    if (!textMatches || textMatches.length === 0) {
       return '자막 텍스트를 찾을 수 없습니다.';
     }
     
