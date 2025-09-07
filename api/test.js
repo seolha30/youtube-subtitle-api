@@ -7,27 +7,22 @@ export default async function handler(req, res) {
     return res.status(200).end();
   }
   
-  const { videoId, apiKey } = req.query;
+  const { videoId } = req.query;
   
   if (!videoId) {
     return res.json({ error: 'videoId가 필요합니다' });
   }
   
-  if (!apiKey) {
-    return res.json({ error: 'API 키가 필요합니다' });
-  }
-  
   try {
-    // YouTube Data API v3를 사용한 자막 수집
-    const subtitleData = await getYouTubeSubtitlesV3(videoId, apiKey);
+    // 실제 작동하는 무료 API 사용
+    const subtitleData = await getSubtitlesFromFreeAPI(videoId);
     
     return res.json({
       success: true,
       videoId: videoId,
       availableLanguages: subtitleData.languages,
       subtitle: subtitleData.subtitle,
-      language: subtitleData.selectedLanguage,
-      method: 'YouTube Data API v3'
+      language: subtitleData.selectedLanguage
     });
     
   } catch (error) {
@@ -40,154 +35,130 @@ export default async function handler(req, res) {
   }
 }
 
-// YouTube Data API v3를 사용한 자막 수집
-async function getYouTubeSubtitlesV3(videoId, apiKey) {
-  try {
-    // 1단계: 자막 목록 조회
-    const captionsUrl = `https://www.googleapis.com/youtube/v3/captions?part=snippet&videoId=${videoId}&key=${apiKey}`;
-    const captionsResponse = await fetch(captionsUrl);
-    
-    if (!captionsResponse.ok) {
-      const errorData = await captionsResponse.json().catch(() => ({}));
-      throw new Error(`API 요청 실패 (${captionsResponse.status}): ${errorData.error?.message || '알 수 없는 오류'}`);
-    }
-    
-    const captionsData = await captionsResponse.json();
-    const captions = captionsData.items || [];
-    
-    if (captions.length === 0) {
-      throw new Error('이 영상에는 자막이 없습니다.');
-    }
-    
-    // 2단계: 언어 우선순위 설정
-    const priorityLanguages = ['ko', 'kr', 'en', 'en-US', 'en-GB'];
-    let selectedCaption = null;
-    
-    // 우선순위 언어 찾기
-    for (const lang of priorityLanguages) {
-      selectedCaption = captions.find(caption => 
-        caption.snippet.language.toLowerCase().startsWith(lang.toLowerCase())
-      );
-      if (selectedCaption) break;
-    }
-    
-    // 우선순위 언어가 없으면 첫 번째 자막 사용
-    if (!selectedCaption) {
-      selectedCaption = captions[0];
-    }
-    
-    // 3단계: 자막 다운로드 시도
-    let subtitleText = '';
-    
-    try {
-      // 방법 1: 공식 API로 자막 다운로드 시도
-      const subtitleUrl = `https://www.googleapis.com/youtube/v3/captions/${selectedCaption.id}?key=${apiKey}&tfmt=srv3`;
-      const subtitleResponse = await fetch(subtitleUrl);
-      
-      if (subtitleResponse.ok) {
-        subtitleText = await subtitleResponse.text();
-        // SRV3 형식 파싱
-        subtitleText = parseSRV3Format(subtitleText);
-      } else {
-        throw new Error('자막 다운로드 권한 없음');
+// 무료 API들 시도
+async function getSubtitlesFromFreeAPI(videoId) {
+  const freeAPIs = [
+    {
+      name: 'youtube-transcript-api',
+      url: `https://youtube-transcript-api.wl.r.appspot.com/api/v1/transcript?video_id=${videoId}`,
+      parser: parseTranscriptAPI
+    },
+    {
+      name: 'subtitle-horse',
+      url: `https://subtitle-horse.p.rapidapi.com/youtube/subtitles?videoId=${videoId}`,
+      parser: parseSubtitleHorse,
+      headers: {
+        'X-RapidAPI-Key': 'demo', // 무료 데모 키
+        'X-RapidAPI-Host': 'subtitle-horse.p.rapidapi.com'
       }
-    } catch (downloadError) {
-      // 방법 2: 대안 방법 - 자막 정보만 제공
-      subtitleText = generateSubtitleInfo(captions, selectedCaption, videoId);
+    },
+    {
+      name: 'youtube-captions-api',
+      url: `https://api.streamelements.com/kappa/v2/youtube/video/${videoId}/captions`,
+      parser: parseStreamElements
     }
-    
-    return {
-      languages: captions.map(caption => `${caption.snippet.name} (${caption.snippet.language})`),
-      subtitle: subtitleText,
-      selectedLanguage: `${selectedCaption.snippet.name} (${selectedCaption.snippet.language})`
-    };
-    
-  } catch (error) {
-    throw new Error(`YouTube API 오류: ${error.message}`);
+  ];
+  
+  for (const api of freeAPIs) {
+    try {
+      console.log(`${api.name} 시도 중...`);
+      
+      const options = {
+        method: 'GET',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          ...(api.headers || {})
+        }
+      };
+      
+      const response = await fetch(api.url, options);
+      
+      if (response.ok) {
+        const data = await response.json();
+        const result = api.parser(data, videoId);
+        
+        if (result.subtitle && result.subtitle.length > 10) {
+          console.log(`${api.name} 성공!`);
+          return result;
+        }
+      }
+      
+    } catch (error) {
+      console.log(`${api.name} 실패: ${error.message}`);
+      continue;
+    }
   }
+  
+  throw new Error('모든 자막 API에서 수집 실패');
 }
 
-// SRV3 형식 파싱 (YouTube 자막 형식)
-function parseSRV3Format(srv3Data) {
+// API 응답 파서들
+function parseTranscriptAPI(data, videoId) {
   try {
-    // SRV3는 XML 형식
-    const textMatches = srv3Data.match(/<text[^>]*>(.*?)<\/text>/gs);
-    
-    if (!textMatches || textMatches.length === 0) {
-      return '자막 텍스트를 파싱할 수 없습니다.';
+    if (data && data.length > 0) {
+      const subtitle = data.map((item, index) => {
+        const startTime = parseFloat(item.start || 0);
+        const minutes = Math.floor(startTime / 60);
+        const seconds = Math.floor(startTime % 60);
+        const timeStr = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+        
+        return `[${timeStr}] ${item.text}`;
+      }).join('\n');
+      
+      return {
+        languages: ['Auto-detected'],
+        subtitle: subtitle,
+        selectedLanguage: 'Auto-detected'
+      };
     }
-    
-    const subtitleLines = textMatches.map(match => {
-      // 시간 정보 추출
-      const startMatch = match.match(/start="([^"]+)"/);
-      const startTime = startMatch ? parseFloat(startMatch[1]) : 0;
-      
-      // 텍스트 추출
-      let text = match.replace(/<\/?[^>]+(>|$)/g, '');
-      text = decodeHTMLEntities(text);
-      
-      // 시간을 분:초 형식으로 변환
-      const minutes = Math.floor(startTime / 60);
-      const seconds = Math.floor(startTime % 60);
-      const timeStr = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-      
-      return `[${timeStr}] ${text.trim()}`;
-    }).filter(line => line.length > 10); // 너무 짧은 라인 제거
-    
-    return subtitleLines.join('\n');
-    
   } catch (error) {
-    return `SRV3 파싱 오류: ${error.message}`;
+    console.error('TranscriptAPI 파싱 오류:', error);
   }
+  
+  return { languages: [], subtitle: '', selectedLanguage: '' };
 }
 
-// 자막 정보 생성 (다운로드 실패시 대안)
-function generateSubtitleInfo(captions, selectedCaption, videoId) {
-  const languageList = captions.map(caption => 
-    `• ${caption.snippet.name} (${caption.snippet.language})`
-  ).join('\n');
+function parseSubtitleHorse(data, videoId) {
+  try {
+    if (data && data.subtitles && data.subtitles.length > 0) {
+      const subtitle = data.subtitles.map((item, index) => {
+        return `[${item.start}] ${item.text}`;
+      }).join('\n');
+      
+      return {
+        languages: [data.language || 'Unknown'],
+        subtitle: subtitle,
+        selectedLanguage: data.language || 'Unknown'
+      };
+    }
+  } catch (error) {
+    console.error('SubtitleHorse 파싱 오류:', error);
+  }
   
-  return `🎯 자막 정보 수집 완료!
-
-📺 비디오 ID: ${videoId}
-⏰ 수집 시간: ${new Date().toLocaleString('ko-KR', {timeZone: 'Asia/Seoul'})}
-
-📋 사용 가능한 자막 (${captions.length}개):
-${languageList}
-
-🎯 선택된 자막: ${selectedCaption.snippet.name} (${selectedCaption.snippet.language})
-
-⚠️ 자막 내용 수집 제한:
-YouTube 정책으로 인해 자막 텍스트를 직접 수집할 수 없습니다.
-
-💡 자막 확인 방법:
-1. YouTube에서 영상 열기: https://youtube.com/watch?v=${videoId}
-2. 자막(CC) 버튼 클릭
-3. 설정에서 "${selectedCaption.snippet.name}" 선택
-4. 자막 확인 및 수동 복사
-
-🔧 기술적 이유:
-- YouTube Data API는 자막 목록 조회만 허용
-- 자막 내용 다운로드는 채널 소유자만 가능
-- CORS 및 인증 제한`;
+  return { languages: [], subtitle: '', selectedLanguage: '' };
 }
 
-// HTML 엔티티 디코딩
-function decodeHTMLEntities(text) {
-  const entities = {
-    '&amp;': '&',
-    '&lt;': '<',
-    '&gt;': '>',
-    '&quot;': '"',
-    '&#39;': "'",
-    '&apos;': "'",
-    '&#x27;': "'",
-    '&#x2F;': '/',
-    '&#x60;': '`',
-    '&#x3D;': '='
-  };
+function parseStreamElements(data, videoId) {
+  try {
+    if (data && data.captions && data.captions.length > 0) {
+      const subtitle = data.captions.map((item, index) => {
+        const startTime = parseFloat(item.startTime || 0);
+        const minutes = Math.floor(startTime / 60);
+        const seconds = Math.floor(startTime % 60);
+        const timeStr = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+        
+        return `[${timeStr}] ${item.text}`;
+      }).join('\n');
+      
+      return {
+        languages: ['Auto-detected'],
+        subtitle: subtitle,
+        selectedLanguage: 'Auto-detected'
+      };
+    }
+  } catch (error) {
+    console.error('StreamElements 파싱 오류:', error);
+  }
   
-  return text.replace(/&[^;]+;/g, (entity) => {
-    return entities[entity] || entity;
-  });
+  return { languages: [], subtitle: '', selectedLanguage: '' };
 }
